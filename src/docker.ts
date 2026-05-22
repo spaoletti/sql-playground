@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import type { Engine } from "./state.js";
 
 type EngineConfig = {
@@ -10,6 +13,7 @@ type EngineConfig = {
   env: Record<string, string>;
   readyCheck: string[];
   clientCmd: string[];
+  seedCmd: string[];
   clientEnv?: Record<string, string>;
   label: string;
 };
@@ -20,9 +24,19 @@ export const ENGINES: Record<Engine, EngineConfig> = {
     image: "postgres:latest",
     hostPort: 5432,
     containerPort: 5432,
-    env: { POSTGRES_PASSWORD: "playground" },
-    readyCheck: ["pg_isready", "-U", "postgres"],
-    clientCmd: ["psql", "-U", "postgres"],
+    env: { POSTGRES_PASSWORD: "playground", POSTGRES_DB: "playground" },
+    readyCheck: ["pg_isready", "-U", "postgres", "-d", "playground"],
+    clientCmd: ["psql", "-U", "postgres", "-d", "playground"],
+    seedCmd: [
+      "psql",
+      "-U",
+      "postgres",
+      "-d",
+      "playground",
+      "-v",
+      "ON_ERROR_STOP=1",
+      "-q",
+    ],
     label: "PostgreSQL",
   },
   mysql: {
@@ -30,13 +44,24 @@ export const ENGINES: Record<Engine, EngineConfig> = {
     image: "mysql:latest",
     hostPort: 3306,
     containerPort: 3306,
-    env: { MYSQL_ROOT_PASSWORD: "playground" },
+    env: {
+      MYSQL_ROOT_PASSWORD: "playground",
+      MYSQL_DATABASE: "playground",
+    },
     readyCheck: ["mysqladmin", "ping", "-uroot", "-pplayground", "--silent"],
-    clientCmd: ["mysql", "-uroot"],
+    clientCmd: ["mysql", "-uroot", "playground"],
+    seedCmd: ["mysql", "-uroot", "playground"],
     clientEnv: { MYSQL_PWD: "playground" },
     label: "MySQL",
   },
 };
+
+const SAMPLE_DB_SQL_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "sample-db",
+  "schema.sql",
+);
 
 type CaptureResult = { code: number; stdout: string; stderr: string };
 
@@ -51,6 +76,25 @@ function dockerCapture(args: string[]): Promise<CaptureResult> {
     child.on("error", (err) =>
       resolve({ code: -1, stdout, stderr: stderr + String(err) }),
     );
+  });
+}
+
+function dockerCaptureWithInput(
+  args: string[],
+  input: string,
+): Promise<CaptureResult> {
+  return new Promise((resolve) => {
+    const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => (stdout += d.toString()));
+    child.stderr.on("data", (d) => (stderr += d.toString()));
+    child.on("close", (code) => resolve({ code: code ?? -1, stdout, stderr }));
+    child.on("error", (err) =>
+      resolve({ code: -1, stdout, stderr: stderr + String(err) }),
+    );
+    child.stdin.write(input);
+    child.stdin.end();
   });
 }
 
@@ -130,6 +174,23 @@ export async function waitReady(
   throw new Error(
     `${cfg.label} did not become ready within ${timeoutMs / 1000}s`,
   );
+}
+
+export async function seedSampleDb(engine: Engine): Promise<void> {
+  const cfg = ENGINES[engine];
+  const sql = await readFile(SAMPLE_DB_SQL_PATH, "utf8");
+  const args = ["exec", "-i"];
+  if (cfg.clientEnv) {
+    for (const [k, v] of Object.entries(cfg.clientEnv)) {
+      args.push("-e", `${k}=${v}`);
+    }
+  }
+  args.push(cfg.containerName, ...cfg.seedCmd);
+  const result = await dockerCaptureWithInput(args, sql);
+  if (result.code !== 0) {
+    const msg = result.stderr.trim() || result.stdout.trim() || "unknown error";
+    throw new Error(msg);
+  }
 }
 
 export async function attachInteractive(engine: Engine): Promise<number> {

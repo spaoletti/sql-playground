@@ -3,6 +3,7 @@ import {
   attachInteractive,
   cleanupAll,
   isDockerAvailable,
+  seedSampleDb,
   startContainer,
   stopAndRemove,
   tailLogs,
@@ -50,6 +51,7 @@ async function chooseEngine(): Promise<void> {
     console.log(`Stopping ${ENGINES[state.engine].label}...`);
     await stopAndRemove(state.engine);
     state.engine = null;
+    state.sampleDbLoaded = false;
   }
 
   const cfg = ENGINES[pick];
@@ -77,12 +79,45 @@ async function chooseEngine(): Promise<void> {
   }
 
   state.engine = pick;
-  console.log(`${cfg.label} is ready.\n`);
+  console.log(`${cfg.label} is ready.`);
+
+  console.log("Loading sample database...");
+  try {
+    await seedSampleDb(pick);
+    state.sampleDbLoaded = true;
+    console.log("Sample database loaded.\n");
+  } catch (err) {
+    console.log(
+      `Sample database could not be loaded: ${(err as Error).message}`,
+    );
+    console.log("The engine is still usable.\n");
+  }
+}
+
+function printSampleDbDiagram(): void {
+  console.log(`----------------------------------------------------------------------------
+Sample database: bookstore.
+Relations:
+
+  authors ──< books ──< orders >── customers
+
+Columns:
+  authors    (id, name, country)
+  books      (id, author_id → authors, title, published_year, price)
+  customers  (id, email, name)
+  orders     (id, customer_id → customers, book_id → books, quantity, order_date)
+
+Indexes: books(author_id), orders(customer_id), orders(book_id), orders(order_date)
+----------------------------------------------------------------------------`);
 }
 
 async function runSql(): Promise<void> {
   if (!state.engine) return;
   const cfg = ENGINES[state.engine];
+  if (state.sampleDbLoaded) {
+    console.log();
+    printSampleDbDiagram();
+  }
   console.log(
     `\nLaunching the ${cfg.label} client inside ${cfg.containerName}. Type \\q to return.\n`,
   );
